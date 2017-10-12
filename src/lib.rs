@@ -7,7 +7,7 @@ mod filesystem;
 
 pub mod fs;
 
-pub use filesystem::FileSystem;
+pub use filesystem::{FileSystem, VolumeHeader, ForkData};
 pub use error::HFSPError;
 pub use file_slice::FileSlice;
 
