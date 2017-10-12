@@ -1,0 +1,7 @@
+[package]
+name = "hfsplus-rescue"
+version = "0.1.0"
+authors = ["Francis Russell <francis@unchartedbackwaters.co.uk>"]
+
+[dependencies]
+byteorder = "1.1.0"
