@@ -3,11 +3,36 @@ use error::HFSPError;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Mutex;
 use std::fmt::{self, Display, Formatter};
-use byteorder::{BigEndian, ReadBytesExt};
+use std::mem;
+use std::slice;
+use num;
 
 #[derive(Debug)]
 pub struct FileSystem<F> {
     file: Mutex<F>,
+}
+
+pub trait Structure<F> {
+    fn get_offset(&self) -> u64;
+    fn get_filesystem(&self) -> &FileSystem<F>;
+
+    fn read_number<T: num::PrimInt>(&self, offset: usize) -> fs::Result<T> where F: Read + Seek {
+        let mut result: T = T::zero();
+        let ptr = &mut result as *mut T as *mut u8;
+        let length = mem::size_of::<T>();
+        let mut buffer = unsafe { slice::from_raw_parts_mut(ptr, length) };
+        {
+            let mut file = self.get_filesystem().file.lock().unwrap();
+            file.seek(SeekFrom::Start(self.get_offset() + offset as u64))?;
+            file.read_exact(&mut buffer[..])?;
+        }
+        for i in 0..length/2 {
+            let tmp = buffer[i];
+            buffer[i] = buffer[length - i - 1];
+            buffer[length - i - 1] = tmp;
+        }
+        Ok(result)
+    }
 }
 
 impl<F> FileSystem<F> where F: Read + Seek {
@@ -35,26 +60,22 @@ impl<F> FileSystem<F> where F: Read + Seek {
         }
         Ok(())
     }
-
-    fn read_u16(&self, offset: u64) -> fs::Result<u16> {
-        let mut file = self.file.lock().unwrap();
-        file.seek(SeekFrom::Start(offset))?;
-        let result = file.read_u16::<BigEndian>()?;
-        Ok(result)
-    }
-
-    fn read_u32(&self, offset: u64) -> fs::Result<u32> {
-        let mut file = self.file.lock().unwrap();
-        file.seek(SeekFrom::Start(offset))?;
-        let result = file.read_u32::<BigEndian>()?;
-        Ok(result)
-    }
 }
 
 #[derive(Debug)]
 pub struct VolumeHeader<'a, F> where F: 'a {
     parent: &'a FileSystem<F>,
     offset: u64,
+}
+
+impl<'a, F> Structure<F> for VolumeHeader<'a, F> where F: 'a {
+    fn get_offset(&self) -> u64 {
+        self.offset
+    }
+
+    fn get_filesystem(&self) -> &FileSystem<F> {
+        self.parent
+    }
 }
 
 impl<'a, F> VolumeHeader<'a, F> where F: Read + Seek {
@@ -70,27 +91,27 @@ impl<'a, F> VolumeHeader<'a, F> where F: Read + Seek {
     }
 
     pub fn get_version(&self) -> fs::Result<u16> {
-        self.parent.read_u16(self.offset + 2)
+        self.read_number(2)
     }
 
     pub fn get_file_count(&self) -> fs::Result<u32> {
-        self.parent.read_u32(self.offset + 32)
+        self.read_number(32)
     }
 
     pub fn get_folder_count(&self) -> fs::Result<u32> {
-        self.parent.read_u32(self.offset + 36)
+        self.read_number(36)
     }
 
     pub fn get_block_size(&self) -> fs::Result<u32> {
-        self.parent.read_u32(self.offset + 40)
+        self.read_number(40)
     }
 
     pub fn get_total_blocks(&self) -> fs::Result<u32> {
-        self.parent.read_u32(self.offset + 44)
+        self.read_number(44)
     }
 
     pub fn get_free_blocks(&self) -> fs::Result<u32> {
-        self.parent.read_u32(self.offset + 48)
+        self.read_number(48)
     }
 }
 

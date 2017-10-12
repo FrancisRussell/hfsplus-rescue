@@ -1,5 +1,5 @@
-#![feature(concat_idents)]
 extern crate byteorder;
+extern crate num;
 
 mod error;
 mod file_slice;
