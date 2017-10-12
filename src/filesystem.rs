@@ -26,11 +26,7 @@ pub trait Structure<F> {
             file.seek(SeekFrom::Start(self.get_offset() + offset as u64))?;
             file.read_exact(&mut buffer[..])?;
         }
-        for i in 0..length/2 {
-            let tmp = buffer[i];
-            buffer[i] = buffer[length - i - 1];
-            buffer[length - i - 1] = tmp;
-        }
+        let result = num::PrimInt::from_be(result);
         Ok(result)
     }
 }
