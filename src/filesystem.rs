@@ -1,11 +1,12 @@
-use fs;
+use chrono::{self, TimeZone};
 use error::HFSPError;
-use std::io::{Read, Seek, SeekFrom};
-use std::sync::Mutex;
+use fs;
+use num;
 use std::fmt::{self, Display, Formatter};
+use std::io::{Read, Seek, SeekFrom};
 use std::mem;
 use std::slice;
-use num;
+use std::sync::Mutex;
 
 const OFFSET_VOLUME_HEADER: u64 = 1024;
 const OFFSET_VOLUME_HEADER_FORKS: u64 = 112;
@@ -35,6 +36,21 @@ pub trait Structure<F> {
         }
         let result = num::PrimInt::from_be(result);
         Ok(result)
+    }
+
+    fn read_date(&self, offset: usize, is_local: bool) -> fs::Result<chrono::DateTime<chrono::Local>> where F: Read + Seek {
+        let seconds: u32 = self.read_number(offset)?;
+        let duration = chrono::Duration::seconds(seconds as i64);
+        let origin_date = chrono::NaiveDate::from_ymd(1904, 1, 1);
+        let origin_time = chrono::NaiveTime::from_hms(0,0,0);
+        let origin = chrono::NaiveDateTime::new(origin_date, origin_time);
+
+        let date = if is_local {
+            chrono::Local.from_local_datetime(&origin).single().unwrap() + duration
+        } else {
+            chrono::Local.from_utc_datetime(&origin) + duration
+        };
+        Ok(date)
     }
 }
 
@@ -117,6 +133,18 @@ impl<'a, F> VolumeHeader<'a, F> where F: Read + Seek {
         self.read_number(48)
     }
 
+    pub fn get_modify_date(&self) -> fs::Result<chrono::DateTime<chrono::Local>> {
+        self.read_date(20, false)
+    }
+
+    pub fn get_backup_date(&self) -> fs::Result<chrono::DateTime<chrono::Local>> {
+        self.read_date(24, false)
+    }
+
+    pub fn get_checked_date(&self) -> fs::Result<chrono::DateTime<chrono::Local>> {
+        self.read_date(24, false)
+    }
+
     pub fn get_fork_data_allocation(&self) -> ForkData<'a, F> {
         ForkData::new(self.parent, self.offset + OFFSET_VOLUME_HEADER_FORKS)
     }
@@ -142,6 +170,9 @@ impl<'a, F> Display for VolumeHeader<'a, F> where F: Read + Seek {
     fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
         writeln!(fmt, "Version: {:?}", self.get_version())?;
         writeln!(fmt, "Folder count: {:?}", self.get_folder_count())?;
+        writeln!(fmt, "Modify date: {:?}", self.get_modify_date())?;
+        writeln!(fmt, "Backup date: {:?}", self.get_backup_date())?;
+        writeln!(fmt, "Checked date: {:?}", self.get_checked_date())?;
         writeln!(fmt, "File count: {:?}", self.get_file_count())?;
         writeln!(fmt, "Block size: {:?}", self.get_block_size())?;
         writeln!(fmt, "Total blocks: {:?}", self.get_total_blocks())?;
