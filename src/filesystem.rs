@@ -3,9 +3,10 @@ use error::HFSPError;
 use fs;
 use num;
 use std::fmt::{self, Display, Formatter};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::mem;
 use std::slice;
+use std::cmp;
 use std::sync::Mutex;
 
 const OFFSET_VOLUME_HEADER: u64 = 1024;
@@ -23,6 +24,12 @@ pub struct FileSystem<F> {
 pub trait Structure<F> {
     fn get_offset(&self) -> u64;
     fn get_filesystem(&self) -> &FileSystem<F>;
+
+    fn read(&self, offset: u64, buff: &mut [u8]) -> io::Result<usize> where F: Read + Seek {
+        let mut file = self.get_filesystem().file.lock().unwrap();
+        file.seek(SeekFrom::Start(self.get_offset() + offset))?;
+        file.read(buff)
+    }
 
     fn read_number<T: num::PrimInt>(&self, offset: usize) -> fs::Result<T> where F: Read + Seek {
         let mut result: T = T::zero();
@@ -54,6 +61,16 @@ pub trait Structure<F> {
     }
 }
 
+impl<F> Structure<F> for FileSystem<F> {
+    fn get_offset(&self) -> u64 {
+        0
+    }
+
+    fn get_filesystem(&self) -> &FileSystem<F> {
+        self
+    }
+}
+
 impl<F> FileSystem<F> where F: Read + Seek {
     pub fn new(file: F) -> FileSystem<F> {
         FileSystem {
@@ -79,6 +96,7 @@ impl<F> FileSystem<F> where F: Read + Seek {
         }
         Ok(())
     }
+
 }
 
 #[derive(Debug)]
@@ -149,20 +167,40 @@ impl<'a, F> VolumeHeader<'a, F> where F: Read + Seek {
         ForkData::new(self.parent, self.offset + OFFSET_VOLUME_HEADER_FORKS)
     }
 
+    pub fn get_file_allocation(&self) -> fs::Result<HFSFile<'a, F>> {
+        HFSFile::new(self.parent, self.get_fork_data_allocation())
+    }
+
     pub fn get_fork_data_extents(&self) -> ForkData<'a, F> {
         ForkData::new(self.parent, self.offset + OFFSET_VOLUME_HEADER_FORKS + SIZE_FORK_DATA)
+    }
+
+    pub fn get_file_extents(&self) -> fs::Result<HFSFile<'a, F>> {
+        HFSFile::new(self.parent, self.get_fork_data_extents())
     }
 
     pub fn get_fork_data_catalog(&self) -> ForkData<'a, F> {
         ForkData::new(self.parent, self.offset + OFFSET_VOLUME_HEADER_FORKS + SIZE_FORK_DATA * 2)
     }
 
+    pub fn get_file_catalog(&self) -> fs::Result<HFSFile<'a, F>> {
+        HFSFile::new(self.parent, self.get_fork_data_catalog())
+    }
+
     pub fn get_fork_data_attributes(&self) -> ForkData<'a, F> {
         ForkData::new(self.parent, self.offset + OFFSET_VOLUME_HEADER_FORKS + SIZE_FORK_DATA * 3)
     }
 
+    pub fn get_file_attributes(&self) -> fs::Result<HFSFile<'a, F>> {
+        HFSFile::new(self.parent, self.get_fork_data_attributes())
+    }
+
     pub fn get_fork_data_startup(&self) -> ForkData<'a, F> {
         ForkData::new(self.parent, self.offset + OFFSET_VOLUME_HEADER_FORKS + SIZE_FORK_DATA * 4)
+    }
+
+    pub fn get_file_startup(&self) -> fs::Result<HFSFile<'a, F>> {
+        HFSFile::new(self.parent, self.get_fork_data_startup())
     }
 }
 
@@ -276,5 +314,109 @@ impl<'a, F> Display for ExtentDescriptor<'a, F> where F: Read + Seek {
         writeln!(fmt, "Start block: {:?}", self.get_start_block())?;
         writeln!(fmt, "Block count: {:?}", self.get_block_count())?;
         Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct HFSFile<'a, F> where F: 'a {
+    parent: &'a FileSystem<F>,
+    length: u64,
+    block_size: u64,
+    offsets: Vec<(u64, u32)>,
+    offset: u64,
+}
+
+impl<'a, F> HFSFile<'a, F> where F: Read + Seek {
+    // TODO: Extent overflow support
+    // TODO: Read truncated files when later extents are damaged
+    fn new(parent: &'a FileSystem<F>, fork_data: ForkData<'a, F>) -> fs::Result<HFSFile<'a, F>> {
+        let length = fork_data.get_logical_size()?;
+        let block_size = parent.get_volume_header()?.get_block_size()?;
+
+        let mut offsets = Vec::new();
+        let mut seen_blocks = 0;
+        for idx in 0..(fork_data.num_extent_descriptors()) {
+            let end_offset_bytes = seen_blocks as u64 * block_size as u64;
+            if end_offset_bytes >= length {
+                break;
+            }
+            let descriptor = fork_data.get_extent_descriptor(idx);
+            offsets.push((end_offset_bytes, descriptor.get_start_block()?));
+            seen_blocks += descriptor.get_block_count()?;
+        }
+
+        let end_offset_bytes = seen_blocks as u64 * block_size as u64;
+        if end_offset_bytes < length {
+            return Err(HFSPError::ExtentOverflowNotSupported);
+        }
+
+        let result = HFSFile {
+            parent: parent,
+            block_size: block_size as u64,
+            length: length,
+            offsets: offsets,
+            offset: 0,
+        };
+        Ok(result)
+    }
+}
+
+impl<'a, F> Read for HFSFile<'a, F> where F: Read + Seek {
+    fn read(&mut self, buf: &mut[u8]) -> io::Result<usize> {
+        if self.offset > self.length {
+            panic!("Cannot read beyond end of file");
+        }
+        let read_size = cmp::min(buf.len() as u64, self.length - self.offset) as usize;
+        if read_size == 0 {
+            return Ok(0);
+        }
+        assert!(!self.offsets.is_empty());
+        let extent_index = match self.offsets.binary_search_by_key(&self.offset, |&(o, _)| o) {
+            Ok(idx) => idx,
+            Err(idx) => idx - 1,
+        };
+        let extent_offset = self.offsets[extent_index].1 as u64 * self.block_size;
+        let intra_extent_offset = self.offset - self.offsets[extent_index].0;
+        let fs_offset = extent_offset + intra_extent_offset;
+        let read = self.parent.read(fs_offset, &mut buf[0..read_size])?;
+        self.offset += read as u64;
+        Ok(read)
+    }
+}
+
+impl<'a, F> Seek for HFSFile<'a, F> where F: Read + Seek {
+    // TODO: Handle invalid seeks better
+    fn seek(&mut self, from: io::SeekFrom) -> io::Result<u64> {
+        match from {
+            io::SeekFrom::Start(offset) => {
+                self.offset = offset;
+            },
+            io::SeekFrom::End(offset) => {
+                if offset >= 0 {
+                    self.offset = self.length + (offset as u64);
+                } else {
+                    let offset_magnitude = (-offset) as u64;
+                    if offset_magnitude > self.length {
+                        panic!("Cannot seek before start of file");
+                    } else {
+                        self.offset = self.length - offset_magnitude;
+                    }
+                }
+            },
+            io::SeekFrom::Current(offset) => {
+                if offset >= 0 {
+                    let offset = offset as u64;
+                    self.offset += offset;
+                } else {
+                    let offset_magnitude = (-offset) as u64;
+                    if offset_magnitude > self.offset {
+                        panic!("Cannot seek before start of file");
+                    } else {
+                        self.offset -= offset_magnitude;
+                    }
+                }
+            },
+        }
+        Ok(self.offset)
     }
 }

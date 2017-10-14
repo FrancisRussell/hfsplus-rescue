@@ -8,6 +8,7 @@ pub enum HFSPError {
     IOError(io::Error),
     InvalidVolumeHeader,
     InvalidFileView,
+    ExtentOverflowNotSupported,
 }
 
 impl fmt::Display for HFSPError {
@@ -25,6 +26,7 @@ impl error::Error for HFSPError {
             HFSPError::IOError(_) => &"IO Error",
             HFSPError::InvalidVolumeHeader => &"Invalid Volume Header",
             HFSPError::InvalidFileView => &"Invalid partition offset or length",
+            HFSPError::ExtentOverflowNotSupported => &"Extent overflow file support is unimplemented",
         }
     }
 }
