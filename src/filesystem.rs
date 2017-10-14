@@ -187,6 +187,10 @@ impl<'a, F> VolumeHeader<'a, F> where F: Read + Seek {
         HFSFile::new(self.parent, self.get_fork_data_catalog())
     }
 
+    pub fn get_btree_catalog(&self) -> fs::Result<BTree<HFSFile<'a, F>>> {
+        Ok(BTree::new(self.get_file_catalog()?))
+    }
+
     pub fn get_fork_data_attributes(&self) -> ForkData<'a, F> {
         ForkData::new(self.parent, self.offset + OFFSET_VOLUME_HEADER_FORKS + SIZE_FORK_DATA * 3)
     }
@@ -418,5 +422,17 @@ impl<'a, F> Seek for HFSFile<'a, F> where F: Read + Seek {
             },
         }
         Ok(self.offset)
+    }
+}
+
+pub struct BTree<F> {
+    file: F,
+}
+
+impl<F> BTree<F> {
+    fn new(file: F) -> BTree<F> {
+        BTree {
+            file: file,
+        }
     }
 }
